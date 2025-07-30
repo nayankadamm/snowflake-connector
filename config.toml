@@ -1,0 +1,9 @@
+# config.toml
+[connections.my_example_connection]
+account = "VQABPIR-KY62826"
+user = "NAYAN"
+password = "7558287289EK219f123$"
+role = "ACCOUNTADMIN"
+warehouse = "COMPUTE_WH"
+database = "POC_DB"
+schema = "TEST_SCHEMA"
